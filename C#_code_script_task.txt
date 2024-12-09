@@ -1,0 +1,123 @@
+#region Namespaces
+using System;
+using System.Data;
+using Microsoft.SqlServer.Dts.Runtime;
+using System.Windows.Forms;
+using System.IO;
+using System.Data.OleDb;
+using System.Data.SqlClient;
+using System.Linq;
+
+        
+        public void Main()
+		{
+            string currentdatetime = DateTime.Now.ToString("yyyyMMddHHmmss");
+            string LogFolder = @"FolderName";
+            string ArchiveFolder = @"ArchiveFolderPath"; // Set the Archive Folder path
+            try
+            {
+                string SourceFolder = @"FolderName";
+                var directory = new DirectoryInfo(SourceFolder);
+                FileInfo[] files = directory.GetFiles();
+
+                string FilePath = "";
+
+                foreach (FileInfo file in files)
+                {
+                    string filenamewithoutextension = Path.GetFileNameWithoutExtension(file.Name);
+
+                    // Extract base filename (e.g., "HR" from "HR_1", "HR_2")
+                    string baseFilename = filenamewithoutextension.Split('_')[0];
+
+                    FilePath = Path.Combine(SourceFolder, file.Name);
+
+                    string ConStr;
+                    string HDR = "YES";
+                    ConStr = "Provider=Microsoft.ACE.OLEDB.12.0;Data Source=" + FilePath + ";Extended Properties=\"Excel 12.0;HDR=" + HDR + ";IMEX=1\"";
+                    OleDbConnection cnn = new OleDbConnection(ConStr);
+                    string sqlconnectionstring = @"data source=SQLServerName;initial catalog=AdventureWorks2022;persist security info=True;Integrated Security=SSPI;";
+
+                    cnn.Open();
+                    System.Data.DataTable Sheet = cnn.GetOleDbSchemaTable(OleDbSchemaGuid.Tables, null);
+
+                    foreach (DataRow DrSheet in Sheet.Rows)
+                    {
+                        if (DrSheet["TABLE_NAME"].ToString().Contains("$"))
+                        {
+                            string sheetname = DrSheet["TABLE_NAME"].ToString();
+                            OleDbCommand oconn = new OleDbCommand("select * from [" + sheetname + "]", cnn);
+                            OleDbDataAdapter adp = new OleDbDataAdapter(oconn);
+                            System.Data.DataTable dt = new System.Data.DataTable();
+                            adp.Fill(dt);
+
+                            // Add SourceID column for uniqueness
+                            dt.Columns.Add("SourceID", typeof(string));
+
+                            // Remove $ from sheet name for clean table name
+                            string cleanSheetName = sheetname.Replace("$", "").Replace("'", "");
+
+                            // Populate SourceID with unique row identifiers
+                            
+                            
+                            foreach (DataRow row in dt.Rows)
+                            {
+                                Guid uuid = Guid.NewGuid();
+                                row["SourceID"] = baseFilename + "_" + cleanSheetName + "_" + uuid.ToString();
+                            }
+
+                            // Combined table name with baseFilename and sheet name
+                            string tableName = baseFilename + "_" + cleanSheetName;
+
+                            string tableDDL = "";
+                            tableDDL += "IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = ";
+                            tableDDL += "OBJECT_ID(N'[dbo].[" + tableName + "]') AND type in (N'U'))";
+                            tableDDL += " BEGIN CREATE TABLE [dbo].[" + tableName + "] (";
+
+                            for (int i = 0; i < dt.Columns.Count; i++)
+                            {
+                                
+
+                                if (i != dt.Columns.Count - 1)
+                                    tableDDL += "[" + dt.Columns[i].ColumnName + "] NVARCHAR(4000),";
+                                else
+                                    tableDDL += "[" + dt.Columns[i].ColumnName + "] NVARCHAR(4000)";
+                            }
+                            tableDDL += "); END";
+
+                            using (SqlConnection sqlCon = new SqlConnection(sqlconnectionstring))
+                            {
+                                sqlCon.Open();
+
+                                // Create table if it doesn't exist
+                                SqlCommand command = new SqlCommand(tableDDL, sqlCon);
+                                command.CommandTimeout = 0;
+                                command.ExecuteNonQuery();
+
+                                // Append data to the existing table
+                                using (SqlBulkCopy blk = new SqlBulkCopy(sqlCon, SqlBulkCopyOptions.KeepIdentity, null))
+                                {
+                                    blk.DestinationTableName = "[" + tableName + "]";
+                                    blk.WriteToServer(dt);
+                                }
+                            }
+                        }
+                    }
+                    cnn.Close();
+
+                    // Move the processed file to the Archive folder
+                    string archivedFilePath = Path.Combine(ArchiveFolder, file.Name);
+                    File.Move(FilePath, archivedFilePath);
+                }
+            }
+            catch (Exception exception)
+            {
+                using (StreamWriter sw = File.CreateText(Path.Combine(LogFolder, "ErrorLog_" + currentdatetime + ".log")))
+                {
+                    sw.WriteLine(exception.ToString());
+                }
+            }
+
+            Dts.TaskResult = (int)ScriptResults.Success;
+		}
+
+        
